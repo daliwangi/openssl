@@ -160,7 +160,7 @@ int EVP_PKEY_up_ref(EVP_PKEY *pkey)
 {
     int i;
 
-    if (CRYPTO_atomic_add(&pkey->references, 1, &i, pkey->lock) <= 0)
+    if (CRYPTO_UP_REF(&pkey->references, &i, pkey->lock) <= 0)
         return 0;
 
     REF_PRINT_COUNT("EVP_PKEY", pkey);
@@ -392,12 +392,13 @@ void EVP_PKEY_free(EVP_PKEY *x)
     if (x == NULL)
         return;
 
-    CRYPTO_atomic_add(&x->references, -1, &i, x->lock);
+    CRYPTO_DOWN_REF(&x->references, &i, x->lock);
     REF_PRINT_COUNT("EVP_PKEY", x);
     if (i > 0)
         return;
     REF_ASSERT_ISNT(i < 0);
     EVP_PKEY_free_it(x);
+    CRYPTO_THREAD_lock_free(x->lock);
     sk_X509_ATTRIBUTE_pop_free(x->attributes, X509_ATTRIBUTE_free);
     OPENSSL_free(x);
 }
@@ -413,7 +414,6 @@ static void EVP_PKEY_free_it(EVP_PKEY *x)
     ENGINE_finish(x->engine);
     x->engine = NULL;
 #endif
-    CRYPTO_THREAD_lock_free(x->lock);
 }
 
 static int unsup_alg(BIO *out, const EVP_PKEY *pkey, int indent,

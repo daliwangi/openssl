@@ -152,6 +152,7 @@ const char *ssl_alert_name(int alert)
 /********************/
 
 static const test_enum ssl_protocols[] = {
+     {"TLSv1.3", TLS1_3_VERSION},
      {"TLSv1.2", TLS1_2_VERSION},
      {"TLSv1.1", TLS1_1_VERSION},
      {"TLSv1", TLS1_VERSION},
@@ -339,7 +340,8 @@ IMPLEMENT_SSL_TEST_STRING_OPTION(SSL_TEST_CTX, test, expected_alpn_protocol)
 static const test_enum ssl_handshake_modes[] = {
     {"Simple", SSL_TEST_HANDSHAKE_SIMPLE},
     {"Resume", SSL_TEST_HANDSHAKE_RESUME},
-    {"Renegotiate", SSL_TEST_HANDSHAKE_RENEGOTIATE},
+    {"RenegotiateServer", SSL_TEST_HANDSHAKE_RENEG_SERVER},
+    {"RenegotiateClient", SSL_TEST_HANDSHAKE_RENEG_CLIENT},
 };
 
 __owur static int parse_handshake_mode(SSL_TEST_CTX *test_ctx, const char *value)
@@ -389,6 +391,34 @@ const char *ssl_ct_validation_name(ssl_ct_validation_t mode)
 
 IMPLEMENT_SSL_TEST_BOOL_OPTION(SSL_TEST_CTX, test, resumption_expected)
 IMPLEMENT_SSL_TEST_BOOL_OPTION(SSL_TEST_SERVER_CONF, server, broken_session_ticket)
+
+/**************/
+/* CertStatus */
+/**************/
+
+static const test_enum ssl_certstatus[] = {
+    {"None", SSL_TEST_CERT_STATUS_NONE},
+    {"GoodResponse", SSL_TEST_CERT_STATUS_GOOD_RESPONSE},
+    {"BadResponse", SSL_TEST_CERT_STATUS_BAD_RESPONSE}
+};
+
+__owur static int parse_certstatus(SSL_TEST_SERVER_CONF *server_conf,
+                                            const char *value)
+{
+    int ret_value;
+    if (!parse_enum(ssl_certstatus, OSSL_NELEM(ssl_certstatus), &ret_value,
+                    value)) {
+        return 0;
+    }
+    server_conf->cert_status = ret_value;
+    return 1;
+}
+
+const char *ssl_certstatus_name(ssl_cert_status_t cert_status)
+{
+    return enum_name(ssl_certstatus,
+                     OSSL_NELEM(ssl_certstatus), cert_status);
+}
 
 /***********************/
 /* ApplicationData     */
@@ -453,6 +483,7 @@ static const ssl_test_server_option ssl_test_server_options[] = {
     { "NPNProtocols", &parse_server_npn_protocols },
     { "ALPNProtocols", &parse_server_alpn_protocols },
     { "BrokenSessionTicket", &parse_server_broken_session_ticket },
+    { "CertStatus", &parse_certstatus },
 };
 
 /*

@@ -47,7 +47,11 @@ typedef struct enc_struct {
 
 static const BIO_METHOD methods_enc = {
     BIO_TYPE_CIPHER, "cipher",
+    /* TODO: Convert to new style write function */
+    bwrite_conv,
     enc_write,
+    /* TODO: Convert to new style read function */
+    bread_conv,
     enc_read,
     NULL,                       /* enc_puts, */
     NULL,                       /* enc_gets, */
@@ -148,9 +152,12 @@ static int enc_read(BIO *b, char *out, int outl)
 
         if (ctx->read_start == ctx->read_end) { /* time to read more data */
             ctx->read_end = ctx->read_start = &(ctx->buf[BUF_OFFSET]);
-            ctx->read_end += BIO_read(next, ctx->read_start, ENC_BLOCK_SIZE);
+            i = BIO_read(next, ctx->read_start, ENC_BLOCK_SIZE);
+            if (i > 0)
+                ctx->read_end += i;
+        } else {
+            i = ctx->read_end - ctx->read_start;
         }
-        i = ctx->read_end - ctx->read_start;
 
         if (i <= 0) {
             /* Should be continue next time we are called? */

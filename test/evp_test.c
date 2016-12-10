@@ -351,25 +351,28 @@ static int setup_test(struct evp_test *t, const struct evp_test_method *tmeth)
     if (t->meth) {
         t->ntests++;
         if (t->skip) {
-            t->meth = tmeth;
             t->nskip++;
-            return 1;
+        } else {
+            /* run the test */
+            t->err = NULL;
+            if (t->meth->run_test(t) != 1) {
+                fprintf(stderr, "%s test error line %d\n",
+                        t->meth->name, t->start_line);
+                return 0;
+            }
+            if (!check_test_error(t)) {
+                if (t->err)
+                    ERR_print_errors_fp(stderr);
+                t->errors++;
+            }
         }
-        t->err = NULL;
-        if (t->meth->run_test(t) != 1) {
-            fprintf(stderr, "%s test error line %d\n",
-                    t->meth->name, t->start_line);
-            return 0;
-        }
-        if (!check_test_error(t)) {
-            if (t->err)
-                ERR_print_errors_fp(stderr);
-            t->errors++;
-        }
+        /* clean it up */
         ERR_clear_error();
-        t->meth->cleanup(t);
-        OPENSSL_free(t->data);
-        t->data = NULL;
+        if (t->data != NULL) {
+            t->meth->cleanup(t);
+            OPENSSL_free(t->data);
+            t->data = NULL;
+        }
         OPENSSL_free(t->expected_err);
         t->expected_err = NULL;
         free_expected(t);
@@ -1212,9 +1215,7 @@ static int pkey_test_init(struct evp_test *t, const char *name,
         rv = find_key(&pkey, name, t->public);
     if (!rv)
         rv = find_key(&pkey, name, t->private);
-    if (!rv)
-        return 0;
-    if (!pkey) {
+    if (!rv || pkey == NULL) {
         t->skip = 1;
         return 1;
     }
@@ -1246,7 +1247,8 @@ static void pkey_test_cleanup(struct evp_test *t)
     EVP_PKEY_CTX_free(kdata->ctx);
 }
 
-static int pkey_test_ctrl(EVP_PKEY_CTX *pctx, const char *value)
+static int pkey_test_ctrl(struct evp_test *t, EVP_PKEY_CTX *pctx,
+                          const char *value)
 {
     int rv;
     char *p, *tmpval;
@@ -1258,6 +1260,13 @@ static int pkey_test_ctrl(EVP_PKEY_CTX *pctx, const char *value)
     if (p != NULL)
         *p++ = 0;
     rv = EVP_PKEY_CTX_ctrl_str(pctx, tmpval, p);
+    if (p != NULL && rv <= 0 && rv != -2) {
+        /* If p has an OID assume disabled algorithm */
+        if (OBJ_sn2nid(p) != NID_undef || OBJ_ln2nid(p) != NID_undef) {
+            t->skip = 1;
+            rv = 1;
+        }
+    }
     OPENSSL_free(tmpval);
     return rv > 0;
 }
@@ -1271,7 +1280,7 @@ static int pkey_test_parse(struct evp_test *t,
     if (strcmp(keyword, "Output") == 0)
         return test_bin(value, &kdata->output, &kdata->output_len);
     if (strcmp(keyword, "Ctrl") == 0)
-        return pkey_test_ctrl(kdata->ctx, value);
+        return pkey_test_ctrl(t, kdata->ctx, value);
     return 0;
 }
 
@@ -1391,7 +1400,7 @@ static int pderive_test_parse(struct evp_test *t,
     if (strcmp(keyword, "SharedSecret") == 0)
         return test_bin(value, &kdata->output, &kdata->output_len);
     if (strcmp(keyword, "Ctrl") == 0)
-        return pkey_test_ctrl(kdata->ctx, value);
+        return pkey_test_ctrl(t, kdata->ctx, value);
     return 0;
 }
 
@@ -1812,7 +1821,7 @@ static int kdf_test_parse(struct evp_test *t,
     if (strcmp(keyword, "Output") == 0)
         return test_bin(value, &kdata->output, &kdata->output_len);
     if (strncmp(keyword, "Ctrl", 4) == 0)
-        return pkey_test_ctrl(kdata->ctx, value);
+        return pkey_test_ctrl(t, kdata->ctx, value);
     return 0;
 }
 

@@ -13,9 +13,28 @@ use strict;
 use Pod::Checker;
 use File::Find;
 use File::Basename;
+use File::Spec::Functions;
 use Getopt::Std;
+use lib catdir(dirname($0), "perl");
+use OpenSSL::Util::Pod;
 
+# Options.
 our($opt_s);
+our($opt_u);
+our($opt_h);
+our($opt_n);
+
+sub help()
+{
+    print <<EOF;
+Find small errors (nits) in documentation.  Options:
+    -n Print nits in POD pages
+    -s Also print missing sections in POD pages (implies -n)
+    -u List undocumented functions
+    -h Print this help message
+EOF
+    exit;
+}
 
 my $temp = '/tmp/docnits.txt';
 my $OUT;
@@ -26,10 +45,6 @@ my %mandatory_sections =
       3      => [ 'SYNOPSIS', 'RETURN\s+VALUES' ],
       5      => [ ],
       7      => [ ] );
-my %default_sections =
-    ( apps   => 1,
-      crypto => 3,
-      ssl    => 3 );
 
 # Cross-check functions in the NAME and SYNOPSIS section.
 sub name_synopsis()
@@ -112,8 +127,7 @@ sub check()
 
     &name_synopsis($id, $filename, $contents)
         unless $contents =~ /=for comment generic/
-            or $contents =~ /=for comment openssl_manual_section:7/
-            or $filename =~ m@/apps/@;
+            or $filename =~ m@man[157]/@;
 
     print "$id doesn't start with =pod\n"
         if $contents !~ /^=pod/;
@@ -156,10 +170,8 @@ sub check()
 
     # Find what section this page is in.  If run from "." assume
     # section 3.
-    my $section = $default_sections{$dirname} || 3;
-    if ($contents =~ /^=for\s+comment\s+openssl_manual_section:\s*(\d+)\s*$/m) {
-        $section = $1;
-    }
+    my $section = 3;
+    $section = $1 if $dirname =~ /man([1-9])/;
 
     foreach ((@{$mandatory_sections{'*'}}, @{$mandatory_sections{$section}})) {
         print "$id doesn't have a head1 section matching $_\n"
@@ -180,10 +192,83 @@ sub check()
     unlink $temp || warn "Can't remove $temp, $!";
 }
 
-getopts('s');
+my %dups;
 
-foreach (@ARGV ? @ARGV : glob('doc/*/*.pod')) {
-    &check($_);
+sub parsenum()
+{
+    my $file = shift;
+    my @apis;
+
+    open my $IN, '<', $file
+        or die "Can't open $file, $!, stopped";
+
+    while ( <$IN> ) {
+        next if /\bNOEXIST\b/;
+        next if /\bEXPORT_VAR_AS_FUNC\b/;
+        push @apis, $1 if /([^\s]+).\s/;
+    }
+
+    close $IN;
+
+    print "# Found ", scalar(@apis), " in $file\n";
+    return sort @apis;
+}
+
+sub getdocced()
+{
+    my $dir = shift;
+    my %return;
+
+    foreach my $pod ( glob("$dir/*.pod") ) {
+        my %podinfo = extract_pod_info($pod);
+        foreach my $n ( @{$podinfo{names}} ) {
+            $return{$n} = $pod;
+            print "# Duplicate $n in $pod and $dups{$n}\n"
+                if defined $dups{$n} && $dups{$n} ne $pod;
+            $dups{$n} = $pod;
+        }
+    }
+
+    return %return;
+}
+
+my %docced;
+
+sub printem()
+{
+    my $libname = shift;
+    my $numfile = shift;
+    my $count = 0;
+
+    foreach my $func ( &parsenum($numfile) ) {
+        next if $docced{$func};
+
+        # Skip ASN1 utilities
+        next if $func =~ /^ASN1_/;
+
+        print "$libname:$func\n";
+        $count++;
+    }
+    print "# Found $count missing from $numfile\n\n";
+}
+
+
+getopts('nshu');
+
+&help() if ( $opt_h );
+
+if ( $opt_n or $opt_s ) {
+    foreach (@ARGV ? @ARGV : glob('doc/*/*.pod')) {
+        &check($_);
+    }
+}
+if ( $opt_u ) {
+    my %temp = &getdocced('doc/man3');
+    foreach ( keys %temp ) {
+        $docced{$_} = $temp{$_};
+    }
+    &printem('crypto', 'util/libcrypto.num');
+    &printem('ssl', 'util/libssl.num');
 }
 
 exit;

@@ -145,6 +145,9 @@ void win32_utf8argv(int *argc, char **argv[])
     int wlen, ulen, valid = 1;
     char *arg;
 
+    if (GetEnvironmentVariableW(L"OPENSSL_WIN32_UTF8", NULL, 0) == 0)
+        return;
+
     newargc = 0;
     newargv = NULL;
     if (!validate_argv(newargc))
@@ -299,6 +302,6 @@ void win32_utf8argv(int *argc, char **argv[])
     return;
 }
 #else
-void win32_utf8argv(int &argc, char **argv[])
+void win32_utf8argv(int *argc, char **argv[])
 {   return;   }
 #endif

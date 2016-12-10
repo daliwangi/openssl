@@ -3,7 +3,7 @@
 LibFuzzer
 =========
 
-Or, how to fuzz OpenSSL with [libfuzzer](llvm.org/docs/LibFuzzer.html).
+Or, how to fuzz OpenSSL with [libfuzzer](http://llvm.org/docs/LibFuzzer.html).
 
 Starting from a vanilla+OpenSSH server Ubuntu install.
 
@@ -38,7 +38,9 @@ Configure for fuzzing:
     $ CC=clang ./config enable-fuzz-libfuzzer \
             --with-fuzzer-include=../../svn-work/Fuzzer \
             --with-fuzzer-lib=../../svn-work/Fuzzer/libFuzzer \
-            -DPEDANTIC enable-asan enable-ubsan no-shared
+            -DPEDANTIC enable-asan enable-ubsan no-shared \
+            -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION \
+	    -fsanitize-coverage=edge,indirect-calls,8bit-counters
     $ sudo apt-get install make
     $ LDCMD=clang++ make -j
     $ fuzz/helper.py $FUZZER

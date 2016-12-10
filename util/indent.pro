@@ -283,7 +283,6 @@
 -T HASH_CTX
 -T HEAPENTRY32
 -T HEAPLIST32
--T HEARTBEAT_TEST_FIXTURE
 -T HMAC_CTX
 -T ICA_KEY_RSA_CRT
 -T ICA_KEY_RSA_CRT_REC
@@ -732,3 +731,11 @@
 -T uintmax_t
 -T pqueue
 -T danetls_record
+-T CTLOG_STORE
+-T OPENSSL_INIT_SETTINGS
+-T OSSL_HANDSHAKE_STATE
+-T OSSL_STATEM
+-T ossl_intmax_t
+-T ossl_intmax_t
+-T ossl_uintmax_t
+-T ossl_uintmax_t

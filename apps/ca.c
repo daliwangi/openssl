@@ -47,8 +47,14 @@
 # define R_OK 4
 #endif
 
-#undef BSIZE
-#define BSIZE 256
+#ifndef PATH_MAX
+# define PATH_MAX 4096
+#endif
+#ifndef NAME_MAX
+# define NAME_MAX 255
+#endif
+
+#define CERT_MAX (PATH_MAX + NAME_MAX)
 
 #define BASE_SECTION            "ca"
 
@@ -82,12 +88,14 @@
 #define ENV_DATABASE            "database"
 
 /* Additional revocation information types */
-
-#define REV_NONE                0 /* No additional information */
-#define REV_CRL_REASON          1 /* Value is CRL reason code */
-#define REV_HOLD                2 /* Value is hold instruction */
-#define REV_KEY_COMPROMISE      3 /* Value is cert key compromise time */
-#define REV_CA_COMPROMISE       4 /* Value is CA key compromise time */
+typedef enum {
+    REV_VALID             = -1, /* Valid (not-revoked) status */
+    REV_NONE              = 0, /* No additional information */
+    REV_CRL_REASON        = 1, /* Value is CRL reason code */
+    REV_HOLD              = 2, /* Value is hold instruction */
+    REV_KEY_COMPROMISE    = 3, /* Value is cert key compromise time */
+    REV_CA_COMPROMISE     = 4  /* Value is CA key compromise time */
+} REVINFO_TYPE;
 
 static char *lookup_conf(const CONF *conf, const char *group, const char *tag);
 
@@ -117,7 +125,6 @@ static int certify_spkac(X509 **xret, const char *infile, EVP_PKEY *pkey,
                          const char *enddate, long days, const char *ext_sect, CONF *conf,
                          int verbose, unsigned long certopt,
                          unsigned long nameopt, int default_op, int ext_copy);
-static void write_new_certificate(BIO *bp, X509 *x, int output_der, int notext);
 static int do_body(X509 **xret, EVP_PKEY *pkey, X509 *x509,
                    const EVP_MD *dgst, STACK_OF(OPENSSL_STRING) *sigopts,
                    STACK_OF(CONF_VALUE) *policy, CA_DB *db, BIGNUM *serial,
@@ -126,13 +133,15 @@ static int do_body(X509 **xret, EVP_PKEY *pkey, X509 *x509,
                    int batch, int verbose, X509_REQ *req, const char *ext_sect,
                    CONF *conf, unsigned long certopt, unsigned long nameopt,
                    int default_op, int ext_copy, int selfsign);
-static int do_revoke(X509 *x509, CA_DB *db, int ext, char *extval);
 static int get_certificate_status(const char *ser_status, CA_DB *db);
 static int do_updatedb(CA_DB *db);
 static int check_time_format(const char *str);
-char *make_revocation_str(int rev_type, char *rev_arg);
-int make_revoked(X509_REVOKED *rev, const char *str);
+static int do_revoke(X509 *x509, CA_DB *db, REVINFO_TYPE rev_type,
+                     const char *extval);
+static char *make_revocation_str(REVINFO_TYPE rev_type, const char *rev_arg);
+static int make_revoked(X509_REVOKED *rev, const char *str);
 static int old_entry_print(const ASN1_OBJECT *obj, const ASN1_STRING *str);
+static void write_new_certificate(BIO *bp, X509 *x, int output_der, int notext);
 
 static CONF *extconf = NULL;
 static int preserve = 0;
@@ -148,11 +157,11 @@ typedef enum OPTION_choice {
     OPT_GENCRL, OPT_MSIE_HACK, OPT_CRLDAYS, OPT_CRLHOURS, OPT_CRLSEC,
     OPT_INFILES, OPT_SS_CERT, OPT_SPKAC, OPT_REVOKE, OPT_VALID,
     OPT_EXTENSIONS, OPT_EXTFILE, OPT_STATUS, OPT_UPDATEDB, OPT_CRLEXTS,
-    OPT_CRL_REASON, OPT_CRL_HOLD, OPT_CRL_COMPROMISE,
-    OPT_CRL_CA_COMPROMISE
+    /* Do not change the order here; see related case statements below */
+    OPT_CRL_REASON, OPT_CRL_HOLD, OPT_CRL_COMPROMISE, OPT_CRL_CA_COMPROMISE
 } OPTION_CHOICE;
 
-OPTIONS ca_options[] = {
+const OPTIONS ca_options[] = {
     {"help", OPT_HELP, '-', "Display this summary"},
     {"verbose", OPT_VERBOSE, '-', "Verbose output during processing"},
     {"config", OPT_CONFIG, 's', "A config file"},
@@ -243,19 +252,23 @@ int ca_main(int argc, char **argv)
     const char *serialfile = NULL, *subj = NULL;
     char *prog, *startdate = NULL, *enddate = NULL;
     char *dbfile = NULL, *f, *randfile = NULL;
-    char buf[3][BSIZE];
+    char new_cert[CERT_MAX + 1];
+    char tmp[10 + 1] = "\0";
     char *const *pp;
     const char *p;
     int create_ser = 0, free_key = 0, total = 0, total_done = 0;
     int batch = 0, default_op = 1, doupdatedb = 0, ext_copy = EXT_COPY_NONE;
     int keyformat = FORMAT_PEM, multirdn = 0, notext = 0, output_der = 0;
     int ret = 1, email_dn = 1, req = 0, verbose = 0, gencrl = 0, dorevoke = 0;
-    int i, j, rev_type = REV_NONE, selfsign = 0;
+    int i, j, selfsign = 0;
     long crldays = 0, crlhours = 0, crlsec = 0, days = 0;
     unsigned long chtype = MBSTRING_ASC, nameopt = 0, certopt = 0;
     X509 *x509 = NULL, *x509p = NULL, *x = NULL;
+    REVINFO_TYPE rev_type = REV_NONE;
     X509_REVOKED *r = NULL;
     OPTION_CHOICE o;
+
+    new_cert[CERT_MAX] = '\0';
 
     prog = opt_init(argc, argv, ca_options);
     while ((o = opt_next()) != OPT_EOF) {
@@ -403,21 +416,12 @@ opthelp:
         case OPT_CRLEXTS:
             crl_ext = opt_arg();
             break;
-        case OPT_CRL_REASON:
-            rev_arg = opt_arg();
-            rev_type = REV_CRL_REASON;
-            break;
+        case OPT_CRL_REASON:        /* := REV_CRL_REASON */
         case OPT_CRL_HOLD:
-            rev_arg = opt_arg();
-            rev_type = REV_HOLD;
-            break;
         case OPT_CRL_COMPROMISE:
-            rev_arg = opt_arg();
-            rev_type = REV_KEY_COMPROMISE;
-            break;
         case OPT_CRL_CA_COMPROMISE:
             rev_arg = opt_arg();
-            rev_type = REV_CA_COMPROMISE;
+            rev_type = (o - OPT_CRL_REASON) + REV_CRL_REASON;
             break;
         case OPT_ENGINE:
             e = setup_engine(opt_arg(), 0);
@@ -955,14 +959,14 @@ end_of_options:
                            "\n%d out of %d certificate requests certified, commit? [y/n]",
                            total_done, total);
                 (void)BIO_flush(bio_err);
-                buf[0][0] = '\0';
-                if (!fgets(buf[0], 10, stdin)) {
+                tmp[0] = '\0';
+                if (fgets(tmp, sizeof(tmp), stdin) == NULL) {
                     BIO_printf(bio_err,
                                "CERTIFICATION CANCELED: I/O error\n");
                     ret = 0;
                     goto end;
                 }
-                if ((buf[0][0] != 'y') && (buf[0][0] != 'Y')) {
+                if (tmp[0] != 'y' && tmp[0] != 'Y') {
                     BIO_printf(bio_err, "CERTIFICATION CANCELED\n");
                     ret = 0;
                     goto end;
@@ -992,24 +996,23 @@ end_of_options:
             j = ASN1_STRING_length(serialNumber);
             p = (const char *)ASN1_STRING_get0_data(serialNumber);
 
-            if (strlen(outdir) >= (size_t)(j ? BSIZE - j * 2 - 6 : BSIZE - 8)) {
+            if (strlen(outdir) >= (size_t)(j ? CERT_MAX - j * 2 - 6 : CERT_MAX - 8)) {
                 BIO_printf(bio_err, "certificate file name too long\n");
                 goto end;
             }
 
-            strcpy(buf[2], outdir);
-
+            strcpy(new_cert, outdir);
 #ifndef OPENSSL_SYS_VMS
-            OPENSSL_strlcat(buf[2], "/", sizeof(buf[2]));
+            OPENSSL_strlcat(new_cert, "/", sizeof(new_cert));
 #endif
 
-            n = (char *)&(buf[2][strlen(buf[2])]);
+            n = (char *)&(new_cert[strlen(new_cert)]);
             if (j > 0) {
                 for (k = 0; k < j; k++) {
-                    if (n >= &(buf[2][sizeof(buf[2])]))
+                    if (n >= &(new_cert[sizeof(new_cert)]))
                         break;
                     BIO_snprintf(n,
-                                 &buf[2][0] + sizeof(buf[2]) - n,
+                                 &new_cert[0] + sizeof(new_cert) - n,
                                  "%02X", (unsigned char)*(p++));
                     n += 2;
                 }
@@ -1023,11 +1026,11 @@ end_of_options:
             *(n++) = 'm';
             *n = '\0';
             if (verbose)
-                BIO_printf(bio_err, "writing %s\n", buf[2]);
+                BIO_printf(bio_err, "writing %s\n", new_cert);
 
-            Cout = BIO_new_file(buf[2], "w");
+            Cout = BIO_new_file(new_cert, "w");
             if (Cout == NULL) {
-                perror(buf[2]);
+                perror(new_cert);
                 goto end;
             }
             write_new_certificate(Cout, x, 0, notext);
@@ -1199,7 +1202,7 @@ end_of_options:
             if (revcert == NULL)
                 goto end;
             if (dorevoke == 2)
-                rev_type = -1;
+                rev_type = REV_VALID;
             j = do_revoke(revcert, db, rev_type, rev_arg);
             if (j <= 0)
                 goto end;
@@ -1236,6 +1239,7 @@ end_of_options:
     X509_CRL_free(crl);
     NCONF_free(conf);
     NCONF_free(extconf);
+    release_engine(e);
     return (ret);
 }
 
@@ -1640,16 +1644,16 @@ static int do_body(X509 **xret, EVP_PKEY *pkey, X509 *x509,
 
     if (rrow != NULL) {
         BIO_printf(bio_err, "The matching entry has the following details\n");
-        if (rrow[DB_type][0] == 'E')
+        if (rrow[DB_type][0] == DB_TYPE_EXP)
             p = "Expired";
-        else if (rrow[DB_type][0] == 'R')
+        else if (rrow[DB_type][0] == DB_TYPE_REV)
             p = "Revoked";
-        else if (rrow[DB_type][0] == 'V')
+        else if (rrow[DB_type][0] == DB_TYPE_VAL)
             p = "Valid";
         else
             p = "\ninvalid type, Data base error\n";
         BIO_printf(bio_err, "Type          :%s\n", p);;
-        if (rrow[DB_type][0] == 'R') {
+        if (rrow[DB_type][0] == DB_TYPE_REV) {
             p = rrow[DB_exp_date];
             if (p == NULL)
                 p = "undef";
@@ -1800,13 +1804,13 @@ static int do_body(X509 **xret, EVP_PKEY *pkey, X509 *x509,
         BIO_printf(bio_err, "Sign the certificate? [y/n]:");
         (void)BIO_flush(bio_err);
         buf[0] = '\0';
-        if (!fgets(buf, sizeof(buf) - 1, stdin)) {
+        if (fgets(buf, sizeof(buf), stdin) == NULL) {
             BIO_printf(bio_err,
                        "CERTIFICATE WILL NOT BE CERTIFIED: I/O error\n");
             ok = 0;
             goto end;
         }
-        if (!((buf[0] == 'y') || (buf[0] == 'Y'))) {
+        if (!(buf[0] == 'y' || buf[0] == 'Y')) {
             BIO_printf(bio_err, "CERTIFICATE WILL NOT BE CERTIFIED\n");
             ok = 0;
             goto end;
@@ -1821,7 +1825,7 @@ static int do_body(X509 **xret, EVP_PKEY *pkey, X509 *x509,
     if (!do_X509_sign(ret, pkey, dgst, sigopts))
         goto end;
 
-    /* We now just add it to the database */
+    /* We now just add it to the database as DB_TYPE_VAL('V') */
     row[DB_type] = OPENSSL_strdup("V");
     tm = X509_get0_notAfter(ret);
     row[DB_exp_date] = app_malloc(tm->length + 1, "row expdate");
@@ -1916,7 +1920,6 @@ static int certify_spkac(X509 **xret, const char *infile, EVP_PKEY *pkey,
     sk = CONF_get_section(parms, "default");
     if (sk_CONF_VALUE_num(sk) == 0) {
         BIO_printf(bio_err, "no name/value pairs found in %s\n", infile);
-        CONF_free(parms);
         goto end;
     }
 
@@ -2020,7 +2023,8 @@ static int check_time_format(const char *str)
     return ASN1_TIME_set_string(NULL, str);
 }
 
-static int do_revoke(X509 *x509, CA_DB *db, int type, char *value)
+static int do_revoke(X509 *x509, CA_DB *db, REVINFO_TYPE rev_type,
+                     const char *value)
 {
     const ASN1_TIME *tm = NULL;
     char *row[DB_NUMBER], **rrow, **irow;
@@ -2053,7 +2057,7 @@ static int do_revoke(X509 *x509, CA_DB *db, int type, char *value)
                    "Adding Entry with serial number %s to DB for %s\n",
                    row[DB_serial], row[DB_name]);
 
-        /* We now just add it to the database */
+        /* We now just add it to the database as DB_TYPE_REV('V') */
         row[DB_type] = OPENSSL_strdup("V");
         tm = X509_get0_notAfter(x509);
         row[DB_exp_date] = app_malloc(tm->length + 1, "row exp_data");
@@ -2076,32 +2080,33 @@ static int do_revoke(X509 *x509, CA_DB *db, int type, char *value)
         }
 
         /* Revoke Certificate */
-        if (type == -1)
+        if (rev_type == REV_VALID)
             ok = 1;
         else
-            ok = do_revoke(x509, db, type, value);
+            /* Retry revocation after DB insertion */
+            ok = do_revoke(x509, db, rev_type, value);
 
         goto end;
 
     } else if (index_name_cmp_noconst(row, rrow)) {
         BIO_printf(bio_err, "ERROR:name does not match %s\n", row[DB_name]);
         goto end;
-    } else if (type == -1) {
+    } else if (rev_type == REV_VALID) {
         BIO_printf(bio_err, "ERROR:Already present, serial number %s\n",
                    row[DB_serial]);
         goto end;
-    } else if (rrow[DB_type][0] == 'R') {
+    } else if (rrow[DB_type][0] == DB_TYPE_REV) {
         BIO_printf(bio_err, "ERROR:Already revoked, serial number %s\n",
                    row[DB_serial]);
         goto end;
     } else {
         BIO_printf(bio_err, "Revoking Certificate %s.\n", rrow[DB_serial]);
-        rev_str = make_revocation_str(type, value);
+        rev_str = make_revocation_str(rev_type, value);
         if (!rev_str) {
             BIO_printf(bio_err, "Error in revocation arguments\n");
             goto end;
         }
-        rrow[DB_type][0] = 'R';
+        rrow[DB_type][0] = DB_TYPE_REV;
         rrow[DB_type][1] = '\0';
         rrow[DB_rev_date] = rev_str;
     }
@@ -2153,19 +2158,19 @@ static int get_certificate_status(const char *serial, CA_DB *db)
         BIO_printf(bio_err, "Serial %s not present in db.\n", row[DB_serial]);
         ok = -1;
         goto end;
-    } else if (rrow[DB_type][0] == 'V') {
+    } else if (rrow[DB_type][0] == DB_TYPE_VAL) {
         BIO_printf(bio_err, "%s=Valid (%c)\n",
                    row[DB_serial], rrow[DB_type][0]);
         goto end;
-    } else if (rrow[DB_type][0] == 'R') {
+    } else if (rrow[DB_type][0] == DB_TYPE_REV) {
         BIO_printf(bio_err, "%s=Revoked (%c)\n",
                    row[DB_serial], rrow[DB_type][0]);
         goto end;
-    } else if (rrow[DB_type][0] == 'E') {
+    } else if (rrow[DB_type][0] == DB_TYPE_EXP) {
         BIO_printf(bio_err, "%s=Expired (%c)\n",
                    row[DB_serial], rrow[DB_type][0]);
         goto end;
-    } else if (rrow[DB_type][0] == 'S') {
+    } else if (rrow[DB_type][0] == DB_TYPE_SUSP) {
         BIO_printf(bio_err, "%s=Suspended (%c)\n",
                    row[DB_serial], rrow[DB_type][0]);
         goto end;
@@ -2207,7 +2212,7 @@ static int do_updatedb(CA_DB *db)
     for (i = 0; i < sk_OPENSSL_PSTRING_num(db->db->data); i++) {
         rrow = sk_OPENSSL_PSTRING_value(db->db->data, i);
 
-        if (rrow[DB_type][0] == 'V') {
+        if (rrow[DB_type][0] == DB_TYPE_VAL) {
             /* ignore entries that are not valid */
             if (strncmp(rrow[DB_exp_date], "49", 2) <= 0)
                 db_y2k = 1;
@@ -2217,14 +2222,14 @@ static int do_updatedb(CA_DB *db)
             if (db_y2k == a_y2k) {
                 /* all on the same y2k side */
                 if (strcmp(rrow[DB_exp_date], a_tm_s) <= 0) {
-                    rrow[DB_type][0] = 'E';
+                    rrow[DB_type][0] = DB_TYPE_EXP;
                     rrow[DB_type][1] = '\0';
                     cnt++;
 
                     BIO_printf(bio_err, "%s=Expired\n", rrow[DB_serial]);
                 }
             } else if (db_y2k < a_y2k) {
-                rrow[DB_type][0] = 'E';
+                rrow[DB_type][0] = DB_TYPE_EXP;
                 rrow[DB_type][1] = '\0';
                 cnt++;
 
@@ -2264,16 +2269,17 @@ static const char *crl_reasons[] = {
  * additional argument
  */
 
-char *make_revocation_str(int rev_type, char *rev_arg)
+static char *make_revocation_str(REVINFO_TYPE rev_type, const char *rev_arg)
 {
     char *str;
-    const char *other = NULL;
-    const char *reason = NULL;
+    const char *reason = NULL, *other = NULL;
     ASN1_OBJECT *otmp;
     ASN1_UTCTIME *revtm = NULL;
     int i;
+
     switch (rev_type) {
     case REV_NONE:
+    case REV_VALID:
         break;
 
     case REV_CRL_REASON:
@@ -2291,7 +2297,6 @@ char *make_revocation_str(int rev_type, char *rev_arg)
 
     case REV_HOLD:
         /* Argument is an OID */
-
         otmp = OBJ_txt2obj(rev_arg, 0);
         ASN1_OBJECT_free(otmp);
 
@@ -2306,7 +2311,6 @@ char *make_revocation_str(int rev_type, char *rev_arg)
 
     case REV_KEY_COMPROMISE:
     case REV_CA_COMPROMISE:
-
         /* Argument is the key compromise time  */
         if (!ASN1_GENERALIZEDTIME_set_string(NULL, rev_arg)) {
             BIO_printf(bio_err,
@@ -2321,7 +2325,6 @@ char *make_revocation_str(int rev_type, char *rev_arg)
             reason = "CAkeyTime";
 
         break;
-
     }
 
     revtm = X509_gmtime_adj(NULL, 0);
@@ -2358,7 +2361,7 @@ char *make_revocation_str(int rev_type, char *rev_arg)
  * 2 OK and some extensions added (i.e. V2 CRL)
  */
 
-int make_revoked(X509_REVOKED *rev, const char *str)
+static int make_revoked(X509_REVOKED *rev, const char *str)
 {
     char *tmp = NULL;
     int reason_code = -1;

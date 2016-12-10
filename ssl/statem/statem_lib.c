@@ -30,9 +30,10 @@
 int ssl3_do_write(SSL *s, int type)
 {
     int ret;
+    size_t written = 0;
 
     ret = ssl3_write_bytes(s, type, &s->init_buf->data[s->init_off],
-                           s->init_num);
+                           s->init_num, &written);
     if (ret < 0)
         return (-1);
     if (type == SSL3_RT_HANDSHAKE)
@@ -42,57 +43,83 @@ int ssl3_do_write(SSL *s, int type)
          */
         if (!ssl3_finish_mac(s,
                              (unsigned char *)&s->init_buf->data[s->init_off],
-                             ret))
+                             written))
             return -1;
 
-    if (ret == s->init_num) {
+    if (written == s->init_num) {
         if (s->msg_callback)
             s->msg_callback(1, s->version, type, s->init_buf->data,
                             (size_t)(s->init_off + s->init_num), s,
                             s->msg_callback_arg);
         return (1);
     }
-    s->init_off += ret;
-    s->init_num -= ret;
+    s->init_off += written;
+    s->init_num -= written;
     return (0);
 }
 
-int tls_construct_finished(SSL *s, const char *sender, int slen)
+int tls_close_construct_packet(SSL *s, WPACKET *pkt, int htype)
 {
-    unsigned char *p;
-    int i;
-    unsigned long l;
+    size_t msglen;
 
-    p = ssl_handshake_start(s);
-
-    i = s->method->ssl3_enc->final_finish_mac(s,
-                                              sender, slen,
-                                              s->s3->tmp.finish_md);
-    if (i <= 0)
+    if ((htype != SSL3_MT_CHANGE_CIPHER_SPEC && !WPACKET_close(pkt))
+            || !WPACKET_get_length(pkt, &msglen)
+            || msglen > INT_MAX)
         return 0;
-    s->s3->tmp.finish_md_len = i;
-    memcpy(p, s->s3->tmp.finish_md, i);
-    l = i;
+    s->init_num = (int)msglen;
+    s->init_off = 0;
+
+    return 1;
+}
+
+int tls_construct_finished(SSL *s, WPACKET *pkt)
+{
+    size_t finish_md_len;
+    const char *sender;
+    size_t slen;
+
+    if (s->server) {
+        sender = s->method->ssl3_enc->server_finished_label;
+        slen = s->method->ssl3_enc->server_finished_label_len;
+    } else {
+        sender = s->method->ssl3_enc->client_finished_label;
+        slen = s->method->ssl3_enc->client_finished_label_len;
+    }
+
+    finish_md_len = s->method->ssl3_enc->final_finish_mac(s,
+                                                          sender, slen,
+                                                          s->s3->tmp.finish_md);
+    if (finish_md_len == 0) {
+        SSLerr(SSL_F_TLS_CONSTRUCT_FINISHED, ERR_R_INTERNAL_ERROR);
+        goto err;
+    }
+
+    s->s3->tmp.finish_md_len = finish_md_len;
+
+    if (!WPACKET_memcpy(pkt, s->s3->tmp.finish_md, finish_md_len)) {
+        SSLerr(SSL_F_TLS_CONSTRUCT_FINISHED, ERR_R_INTERNAL_ERROR);
+        goto err;
+    }
 
     /*
      * Copy the finished so we can use it for renegotiation checks
      */
     if (!s->server) {
-        OPENSSL_assert(i <= EVP_MAX_MD_SIZE);
-        memcpy(s->s3->previous_client_finished, s->s3->tmp.finish_md, i);
-        s->s3->previous_client_finished_len = i;
+        OPENSSL_assert(finish_md_len <= EVP_MAX_MD_SIZE);
+        memcpy(s->s3->previous_client_finished, s->s3->tmp.finish_md,
+               finish_md_len);
+        s->s3->previous_client_finished_len = finish_md_len;
     } else {
-        OPENSSL_assert(i <= EVP_MAX_MD_SIZE);
-        memcpy(s->s3->previous_server_finished, s->s3->tmp.finish_md, i);
-        s->s3->previous_server_finished_len = i;
-    }
-
-    if (!ssl_set_handshake_header(s, SSL3_MT_FINISHED, l)) {
-        SSLerr(SSL_F_TLS_CONSTRUCT_FINISHED, ERR_R_INTERNAL_ERROR);
-        return 0;
+        OPENSSL_assert(finish_md_len <= EVP_MAX_MD_SIZE);
+        memcpy(s->s3->previous_server_finished, s->s3->tmp.finish_md,
+               finish_md_len);
+        s->s3->previous_server_finished_len = finish_md_len;
     }
 
     return 1;
+ err:
+    ssl3_send_alert(s, SSL3_AL_FATAL, SSL_AD_INTERNAL_ERROR);
+    return 0;
 }
 
 #ifndef OPENSSL_NO_NEXTPROTONEG
@@ -103,7 +130,7 @@ int tls_construct_finished(SSL *s, const char *sender, int slen)
 static void ssl3_take_mac(SSL *s)
 {
     const char *sender;
-    int slen;
+    size_t slen;
     /*
      * If no new cipher setup return immediately: other functions will set
      * the appropriate error.
@@ -128,7 +155,7 @@ static void ssl3_take_mac(SSL *s)
 MSG_PROCESS_RETURN tls_process_change_cipher_spec(SSL *s, PACKET *pkt)
 {
     int al;
-    long remain;
+    size_t remain;
 
     remain = PACKET_remaining(pkt);
     /*
@@ -194,25 +221,27 @@ MSG_PROCESS_RETURN tls_process_change_cipher_spec(SSL *s, PACKET *pkt)
 
 MSG_PROCESS_RETURN tls_process_finished(SSL *s, PACKET *pkt)
 {
-    int al, i;
+    int al = SSL_AD_INTERNAL_ERROR;
+    size_t md_len;
 
     /* If this occurs, we have missed a message */
-    if (!s->s3->change_cipher_spec) {
+    if (!SSL_IS_TLS13(s) && !s->s3->change_cipher_spec) {
         al = SSL_AD_UNEXPECTED_MESSAGE;
         SSLerr(SSL_F_TLS_PROCESS_FINISHED, SSL_R_GOT_A_FIN_BEFORE_A_CCS);
         goto f_err;
     }
     s->s3->change_cipher_spec = 0;
 
-    i = s->s3->tmp.peer_finish_md_len;
+    md_len = s->s3->tmp.peer_finish_md_len;
 
-    if ((unsigned long)i != PACKET_remaining(pkt)) {
+    if (md_len != PACKET_remaining(pkt)) {
         al = SSL_AD_DECODE_ERROR;
         SSLerr(SSL_F_TLS_PROCESS_FINISHED, SSL_R_BAD_DIGEST_LENGTH);
         goto f_err;
     }
 
-    if (CRYPTO_memcmp(PACKET_data(pkt), s->s3->tmp.peer_finish_md, i) != 0) {
+    if (CRYPTO_memcmp(PACKET_data(pkt), s->s3->tmp.peer_finish_md,
+                      md_len) != 0) {
         al = SSL_AD_DECRYPT_ERROR;
         SSLerr(SSL_F_TLS_PROCESS_FINISHED, SSL_R_DIGEST_CHECK_FAILED);
         goto f_err;
@@ -222,13 +251,43 @@ MSG_PROCESS_RETURN tls_process_finished(SSL *s, PACKET *pkt)
      * Copy the finished so we can use it for renegotiation checks
      */
     if (s->server) {
-        OPENSSL_assert(i <= EVP_MAX_MD_SIZE);
-        memcpy(s->s3->previous_client_finished, s->s3->tmp.peer_finish_md, i);
-        s->s3->previous_client_finished_len = i;
+        OPENSSL_assert(md_len <= EVP_MAX_MD_SIZE);
+        memcpy(s->s3->previous_client_finished, s->s3->tmp.peer_finish_md,
+               md_len);
+        s->s3->previous_client_finished_len = md_len;
     } else {
-        OPENSSL_assert(i <= EVP_MAX_MD_SIZE);
-        memcpy(s->s3->previous_server_finished, s->s3->tmp.peer_finish_md, i);
-        s->s3->previous_server_finished_len = i;
+        OPENSSL_assert(md_len <= EVP_MAX_MD_SIZE);
+        memcpy(s->s3->previous_server_finished, s->s3->tmp.peer_finish_md,
+               md_len);
+        s->s3->previous_server_finished_len = md_len;
+    }
+
+    /*
+     * In TLS1.3 we also have to change cipher state and do any final processing
+     * of the initial server flight (if we are a client)
+     */
+    if (SSL_IS_TLS13(s)) {
+        if (s->server) {
+            if (!s->method->ssl3_enc->change_cipher_state(s,
+                    SSL3_CC_APPLICATION | SSL3_CHANGE_CIPHER_SERVER_READ)) {
+                SSLerr(SSL_F_TLS_PROCESS_FINISHED, SSL_R_CANNOT_CHANGE_CIPHER);
+                goto f_err;
+            }
+        } else {
+            if (!s->method->ssl3_enc->generate_master_secret(s,
+                    s->session->master_key, s->handshake_secret, 0,
+                    &s->session->master_key_length)) {
+                SSLerr(SSL_F_TLS_PROCESS_FINISHED, SSL_R_CANNOT_CHANGE_CIPHER);
+                goto f_err;
+            }
+            if (!s->method->ssl3_enc->change_cipher_state(s,
+                    SSL3_CC_APPLICATION | SSL3_CHANGE_CIPHER_CLIENT_READ)) {
+                SSLerr(SSL_F_TLS_PROCESS_FINISHED, SSL_R_CANNOT_CHANGE_CIPHER);
+                goto f_err;
+            }
+            if (!tls_process_initial_server_flight(s, &al))
+                goto f_err;
+        }
     }
 
     return MSG_PROCESS_FINISHED_READING;
@@ -238,36 +297,26 @@ MSG_PROCESS_RETURN tls_process_finished(SSL *s, PACKET *pkt)
     return MSG_PROCESS_ERROR;
 }
 
-int tls_construct_change_cipher_spec(SSL *s)
+int tls_construct_change_cipher_spec(SSL *s, WPACKET *pkt)
 {
-    unsigned char *p;
-
-    p = (unsigned char *)s->init_buf->data;
-    *p = SSL3_MT_CCS;
-    s->init_num = 1;
-    s->init_off = 0;
+    if (!WPACKET_put_bytes_u8(pkt, SSL3_MT_CCS)) {
+        SSLerr(SSL_F_TLS_CONSTRUCT_CHANGE_CIPHER_SPEC, ERR_R_INTERNAL_ERROR);
+        ssl3_send_alert(s, SSL3_AL_FATAL, SSL_AD_INTERNAL_ERROR);
+        return 0;
+    }
 
     return 1;
 }
 
-unsigned long ssl3_output_cert_chain(SSL *s, CERT_PKEY *cpk)
+unsigned long ssl3_output_cert_chain(SSL *s, WPACKET *pkt, CERT_PKEY *cpk)
 {
-    unsigned char *p;
-    unsigned long l = 3 + SSL_HM_HEADER_LENGTH(s);
-
-    if (!ssl_add_cert_chain(s, cpk, &l))
-        return 0;
-
-    l -= 3 + SSL_HM_HEADER_LENGTH(s);
-    p = ssl_handshake_start(s);
-    l2n3(l, p);
-    l += 3;
-
-    if (!ssl_set_handshake_header(s, SSL3_MT_CERTIFICATE, l)) {
+    if (!WPACKET_start_sub_packet_u24(pkt)
+            || !ssl_add_cert_chain(s, pkt, cpk)
+            || !WPACKET_close(pkt)) {
         SSLerr(SSL_F_SSL3_OUTPUT_CERT_CHAIN, ERR_R_INTERNAL_ERROR);
         return 0;
     }
-    return l + SSL_HM_HEADER_LENGTH(s);
+    return 1;
 }
 
 WORK_STATE tls_finish_handshake(SSL *s, WORK_STATE wst)
@@ -343,7 +392,7 @@ int tls_get_message_header(SSL *s, int *mt)
     /* s->init_num < SSL3_HM_HEADER_LENGTH */
     int skip_message, i, recvd_type, al;
     unsigned char *p;
-    unsigned long l;
+    size_t l, readbytes;
 
     p = (unsigned char *)s->init_buf->data;
 
@@ -352,7 +401,7 @@ int tls_get_message_header(SSL *s, int *mt)
             i = s->method->ssl_read_bytes(s, SSL3_RT_HANDSHAKE, &recvd_type,
                                           &p[s->init_num],
                                           SSL3_HM_HEADER_LENGTH - s->init_num,
-                                          0);
+                                          0, &readbytes);
             if (i <= 0) {
                 s->rwstate = SSL_READING;
                 return 0;
@@ -362,22 +411,23 @@ int tls_get_message_header(SSL *s, int *mt)
                  * A ChangeCipherSpec must be a single byte and may not occur
                  * in the middle of a handshake message.
                  */
-                if (s->init_num != 0 || i != 1 || p[0] != SSL3_MT_CCS) {
+                if (s->init_num != 0 || readbytes != 1 || p[0] != SSL3_MT_CCS) {
                     al = SSL_AD_UNEXPECTED_MESSAGE;
                     SSLerr(SSL_F_TLS_GET_MESSAGE_HEADER,
                            SSL_R_BAD_CHANGE_CIPHER_SPEC);
                     goto f_err;
                 }
                 s->s3->tmp.message_type = *mt = SSL3_MT_CHANGE_CIPHER_SPEC;
-                s->init_num = i - 1;
-                s->s3->tmp.message_size = i;
+                s->init_num = readbytes - 1;
+                s->init_msg = s->init_buf->data;
+                s->s3->tmp.message_size = readbytes;
                 return 1;
             } else if (recvd_type != SSL3_RT_HANDSHAKE) {
                 al = SSL_AD_UNEXPECTED_MESSAGE;
                 SSLerr(SSL_F_TLS_GET_MESSAGE_HEADER, SSL_R_CCS_RECEIVED_EARLY);
                 goto f_err;
             }
-            s->init_num += i;
+            s->init_num += readbytes;
         }
 
         skip_message = 0;
@@ -414,10 +464,6 @@ int tls_get_message_header(SSL *s, int *mt)
          */
         l = RECORD_LAYER_get_rrec_length(&s->rlayer)
             + SSL3_HM_HEADER_LENGTH;
-        if (l && !BUF_MEM_grow_clean(s->init_buf, (int)l)) {
-            SSLerr(SSL_F_TLS_GET_MESSAGE_HEADER, ERR_R_BUF_LIB);
-            goto err;
-        }
         s->s3->tmp.message_size = l;
 
         s->init_msg = s->init_buf->data;
@@ -430,11 +476,6 @@ int tls_get_message_header(SSL *s, int *mt)
             SSLerr(SSL_F_TLS_GET_MESSAGE_HEADER, SSL_R_EXCESSIVE_MESSAGE_SIZE);
             goto f_err;
         }
-        if (l && !BUF_MEM_grow_clean(s->init_buf,
-                                     (int)l + SSL3_HM_HEADER_LENGTH)) {
-            SSLerr(SSL_F_TLS_GET_MESSAGE_HEADER, ERR_R_BUF_LIB);
-            goto err;
-        }
         s->s3->tmp.message_size = l;
 
         s->init_msg = s->init_buf->data + SSL3_HM_HEADER_LENGTH;
@@ -444,13 +485,12 @@ int tls_get_message_header(SSL *s, int *mt)
     return 1;
  f_err:
     ssl3_send_alert(s, SSL3_AL_FATAL, al);
- err:
     return 0;
 }
 
-int tls_get_message_body(SSL *s, unsigned long *len)
+int tls_get_message_body(SSL *s, size_t *len)
 {
-    long n;
+    size_t n, readbytes;
     unsigned char *p;
     int i;
 
@@ -464,14 +504,14 @@ int tls_get_message_body(SSL *s, unsigned long *len)
     n = s->s3->tmp.message_size - s->init_num;
     while (n > 0) {
         i = s->method->ssl_read_bytes(s, SSL3_RT_HANDSHAKE, NULL,
-                                      &p[s->init_num], n, 0);
+                                      &p[s->init_num], n, 0, &readbytes);
         if (i <= 0) {
             s->rwstate = SSL_READING;
             *len = 0;
             return 0;
         }
-        s->init_num += i;
-        n -= i;
+        s->init_num += readbytes;
+        n -= readbytes;
     }
 
 #ifndef OPENSSL_NO_NEXTPROTONEG
@@ -509,17 +549,7 @@ int tls_get_message_body(SSL *s, unsigned long *len)
                             s->msg_callback_arg);
     }
 
-    /*
-     * init_num should never be negative...should probably be declared
-     * unsigned
-     */
-    if (s->init_num < 0) {
-        SSLerr(SSL_F_TLS_GET_MESSAGE_BODY, ERR_R_INTERNAL_ERROR);
-        ssl3_send_alert(s, SSL3_AL_FATAL, SSL_AD_INTERNAL_ERROR);
-        *len = 0;
-        return 0;
-    }
-    *len = (unsigned long)s->init_num;
+    *len = s->init_num;
     return 1;
 }
 
@@ -643,11 +673,16 @@ typedef struct {
     const SSL_METHOD *(*smeth) (void);
 } version_info;
 
-#if TLS_MAX_VERSION != TLS1_2_VERSION
-# error Code needs update for TLS_method() support beyond TLS1_2_VERSION.
+#if TLS_MAX_VERSION != TLS1_3_VERSION
+# error Code needs update for TLS_method() support beyond TLS1_3_VERSION.
 #endif
 
 static const version_info tls_version_table[] = {
+#ifndef OPENSSL_NO_TLS1_3
+    {TLS1_3_VERSION, tlsv1_3_client_method, tlsv1_3_server_method},
+#else
+    {TLS1_3_VERSION, NULL, NULL},
+#endif
 #ifndef OPENSSL_NO_TLS1_2
     {TLS1_2_VERSION, tlsv1_2_client_method, tlsv1_2_server_method},
 #else
@@ -868,7 +903,7 @@ int ssl_set_version_bound(int method_version, int version, int *bound)
  *
  * Returns 0 on success or an SSL error reason number on failure.
  */
-int ssl_choose_server_version(SSL *s)
+int ssl_choose_server_version(SSL *s, CLIENTHELLO_MSG *hello)
 {
     /*-
      * With version-flexible methods we have an initial state with:
@@ -880,13 +915,21 @@ int ssl_choose_server_version(SSL *s)
      * handle version.
      */
     int server_version = s->method->version;
-    int client_version = s->client_version;
+    int client_version = hello->legacy_version;
     const version_info *vent;
     const version_info *table;
     int disabled = 0;
+    RAW_EXTENSION *suppversions;
+
+    s->client_version = client_version;
 
     switch (server_version) {
     default:
+        /*
+         * TODO(TLS1.3): This check will fail if someone attempts to do
+         * renegotiation in TLS1.3 at the moment. We need to ensure we disable
+         * renegotiation for TLS1.3
+         */
         if (version_cmp(s, client_version, s->version) < 0)
             return SSL_R_WRONG_SSL_VERSION;
         /*
@@ -905,6 +948,70 @@ int ssl_choose_server_version(SSL *s)
         break;
     }
 
+    suppversions = &hello->pre_proc_exts[TLSEXT_IDX_supported_versions];
+
+    if (suppversions->present && !SSL_IS_DTLS(s)) {
+        unsigned int candidate_vers = 0;
+        unsigned int best_vers = 0;
+        const SSL_METHOD *best_method = NULL;
+        PACKET versionslist;
+
+        suppversions->parsed = 1;
+
+        if (!PACKET_as_length_prefixed_1(&suppversions->data, &versionslist)) {
+            /* Trailing or invalid data? */
+            return SSL_R_LENGTH_MISMATCH;
+        }
+
+        while (PACKET_get_net_2(&versionslist, &candidate_vers)) {
+            /* TODO(TLS1.3): Remove this before release */
+            if (candidate_vers == TLS1_3_VERSION_DRAFT)
+                candidate_vers = TLS1_3_VERSION;
+            /*
+             * TODO(TLS1.3): There is some discussion on the TLS list about
+             * wheter to ignore versions <TLS1.2 in supported_versions. At the
+             * moment we honour them if present. To be reviewed later
+             */
+            if (version_cmp(s, candidate_vers, best_vers) <= 0)
+                continue;
+            for (vent = table;
+                 vent->version != 0 && vent->version != (int)candidate_vers;
+                 ++vent)
+                continue;
+            if (vent->version != 0 && vent->smeth != NULL) {
+                const SSL_METHOD *method;
+
+                method = vent->smeth();
+                if (ssl_method_error(s, method) == 0) {
+                    best_vers = candidate_vers;
+                    best_method = method;
+                }
+            }
+        }
+        if (PACKET_remaining(&versionslist) != 0) {
+            /* Trailing data? */
+            return SSL_R_LENGTH_MISMATCH;
+        }
+
+        if (best_vers > 0) {
+            s->version = best_vers;
+            s->method = best_method;
+            return 0;
+        }
+        return SSL_R_UNSUPPORTED_PROTOCOL;
+    }
+
+    /*
+     * If the supported versions extension isn't present, then the highest
+     * version we can negotiate is TLSv1.2
+     */
+    if (version_cmp(s, client_version, TLS1_3_VERSION) >= 0)
+        client_version = TLS1_2_VERSION;
+
+    /*
+     * No supported versions extension, so we just use the version supplied in
+     * the ClientHello.
+     */
     for (vent = table; vent->version != 0; ++vent) {
         const SSL_METHOD *method;
 
@@ -936,6 +1043,10 @@ int ssl_choose_client_version(SSL *s, int version)
 {
     const version_info *vent;
     const version_info *table;
+
+    /* TODO(TLS1.3): Remove this before release */
+    if (version == TLS1_3_VERSION_DRAFT)
+        version = TLS1_3_VERSION;
 
     switch (s->method->version) {
     default:
@@ -1081,7 +1192,7 @@ int ssl_get_client_min_max_version(const SSL *s, int *min_version,
 
 /*
  * ssl_set_client_hello_version - Work out what version we should be using for
- * the initial ClientHello.
+ * the initial ClientHello.legacy_version field.
  *
  * @s: client SSL handle.
  *
@@ -1096,6 +1207,12 @@ int ssl_set_client_hello_version(SSL *s)
     if (ret != 0)
         return ret;
 
-    s->client_version = s->version = ver_max;
+    s->version = ver_max;
+
+    /* TLS1.3 always uses TLS1.2 in the legacy_version field */
+    if (!SSL_IS_DTLS(s) && ver_max > TLS1_2_VERSION)
+        ver_max = TLS1_2_VERSION;
+
+    s->client_version = ver_max;
     return 0;
 }

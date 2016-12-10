@@ -56,7 +56,7 @@ typedef enum OPTION_choice {
     OPT_CAFILE, OPT_NOCAPATH, OPT_NOCAFILE, OPT_ENGINE
 } OPTION_CHOICE;
 
-OPTIONS pkcs12_options[] = {
+const OPTIONS pkcs12_options[] = {
     {"help", OPT_HELP, '-', "Display this summary"},
     {"nokeys", OPT_NOKEYS, '-', "Don't output private keys"},
     {"keyex", OPT_KEYEX, '-', "Set MS key exchange type"},
@@ -132,7 +132,7 @@ int pkcs12_main(int argc, char **argv)
     int noprompt = 0;
     char *passinarg = NULL, *passoutarg = NULL, *passarg = NULL;
     char *passin = NULL, *passout = NULL, *inrand = NULL, *macalg = NULL;
-    char *cpass = NULL, *mpass = NULL;
+    char *cpass = NULL, *mpass = NULL, *badpass = NULL;
     const char *CApath = NULL, *CAfile = NULL, *prog;
     int noCApath = 0, noCAfile = 0;
     ENGINE *e = NULL;
@@ -539,9 +539,27 @@ int pkcs12_main(int argc, char **argv)
             if (!twopass)
                 cpass = NULL;
         } else if (!PKCS12_verify_mac(p12, mpass, -1)) {
-            BIO_printf(bio_err, "Mac verify error: invalid password?\n");
-            ERR_print_errors(bio_err);
-            goto end;
+            /*
+             * May be UTF8 from previous version of OpenSSL:
+             * convert to a UTF8 form which will translate
+             * to the same Unicode password.
+             */
+            unsigned char *utmp;
+            int utmplen;
+            utmp = OPENSSL_asc2uni(mpass, -1, NULL, &utmplen);
+            if (utmp == NULL)
+                goto end;
+            badpass = OPENSSL_uni2utf8(utmp, utmplen);
+            OPENSSL_free(utmp);
+            if (!PKCS12_verify_mac(p12, badpass, -1)) {
+                BIO_printf(bio_err, "Mac verify error: invalid password?\n");
+                ERR_print_errors(bio_err);
+                goto end;
+            } else {
+                BIO_printf(bio_err, "Warning: using broken algorithm\n");
+                if (!twopass)
+                    cpass = badpass;
+            }
         }
     }
 
@@ -556,9 +574,11 @@ int pkcs12_main(int argc, char **argv)
     PKCS12_free(p12);
     if (export_cert || inrand)
         app_RAND_write_file(NULL);
+    release_engine(e);
     BIO_free(in);
     BIO_free_all(out);
     sk_OPENSSL_STRING_free(canames);
+    OPENSSL_free(badpass);
     OPENSSL_free(passin);
     OPENSSL_free(passout);
     return (ret);

@@ -570,7 +570,6 @@ CRYPTO_cts128_encrypt_block             569	1_1_0	EXIST::FUNCTION:
 ASN1_digest                             570	1_1_0	EXIST::FUNCTION:
 ERR_load_X509V3_strings                 571	1_1_0	EXIST::FUNCTION:
 EVP_PKEY_meth_get_cleanup               572	1_1_0	EXIST::FUNCTION:
-SCT_verify                              573	1_1_0	EXIST::FUNCTION:CT
 d2i_X509                                574	1_1_0	EXIST::FUNCTION:
 a2i_ASN1_STRING                         575	1_1_0	EXIST::FUNCTION:
 EC_GROUP_get_mont_data                  576	1_1_0	EXIST::FUNCTION:EC
@@ -596,7 +595,6 @@ RAND_query_egd_bytes                    596	1_1_0	EXIST::FUNCTION:EGD
 i2d_ASN1_PRINTABLE                      597	1_1_0	EXIST::FUNCTION:
 ENGINE_cmd_is_executable                598	1_1_0	EXIST::FUNCTION:ENGINE
 BIO_puts                                599	1_1_0	EXIST::FUNCTION:
-SCT_verify_v1                           600	1_1_0	EXIST::FUNCTION:CT
 RSAPublicKey_it                         601	1_1_0	EXIST:!EXPORT_VAR_AS_FUNCTION:VARIABLE:RSA
 RSAPublicKey_it                         601	1_1_0	EXIST:EXPORT_VAR_AS_FUNCTION:FUNCTION:RSA
 ISSUING_DIST_POINT_new                  602	1_1_0	EXIST::FUNCTION:
@@ -2538,7 +2536,6 @@ d2i_ECPKParameters                      2501	1_1_0	EXIST::FUNCTION:EC
 IDEA_ofb64_encrypt                      2502	1_1_0	EXIST::FUNCTION:IDEA
 CAST_decrypt                            2503	1_1_0	EXIST::FUNCTION:CAST
 TS_STATUS_INFO_get0_failure_info        2504	1_1_0	EXIST::FUNCTION:TS
-o2i_SCT_signature                       2505	1_1_0	EXIST::FUNCTION:CT
 ENGINE_unregister_pkey_meths            2506	1_1_0	EXIST::FUNCTION:ENGINE
 DISPLAYTEXT_new                         2507	1_1_0	EXIST::FUNCTION:
 CMS_final                               2508	1_1_0	EXIST::FUNCTION:CMS
@@ -3590,7 +3587,6 @@ d2i_BASIC_CONSTRAINTS                   3539	1_1_0	EXIST::FUNCTION:
 X509_CERT_AUX_new                       3540	1_1_0	EXIST::FUNCTION:
 ENGINE_register_pkey_asn1_meths         3541	1_1_0	EXIST::FUNCTION:ENGINE
 CRYPTO_ocb128_tag                       3542	1_1_0	EXIST::FUNCTION:OCB
-i2o_SCT_signature                       3543	1_1_0	EXIST::FUNCTION:CT
 ERR_load_OBJ_strings                    3544	1_1_0	EXIST::FUNCTION:
 BIO_ctrl_get_read_request               3545	1_1_0	EXIST::FUNCTION:
 BN_from_montgomery                      3546	1_1_0	EXIST::FUNCTION:
@@ -4127,7 +4123,7 @@ X509_OBJECT_get0_X509                   4073	1_1_0	EXIST::FUNCTION:
 X509_STORE_CTX_get0_untrusted           4074	1_1_0	EXIST::FUNCTION:
 X509_STORE_CTX_set_error_depth          4075	1_1_0	EXIST::FUNCTION:
 X509_STORE_CTX_get0_cert                4076	1_1_0	EXIST::FUNCTION:
-X509_STORE_CTX_set_verify               4077	1_1_0	NOEXIST::FUNCTION:
+X509_STORE_CTX_set_verify               4077	1_1_0	EXIST::FUNCTION:
 X509_STORE_CTX_set_current_cert         4078	1_1_0	EXIST::FUNCTION:
 X509_STORE_CTX_get_verify               4079	1_1_0	EXIST::FUNCTION:
 X509_STORE_CTX_get_verify_cb            4080	1_1_0	EXIST::FUNCTION:
@@ -4207,3 +4203,20 @@ ECPKPARAMETERS_free                     4153	1_1_0	EXIST::FUNCTION:EC
 ECPARAMETERS_free                       4154	1_1_0	EXIST::FUNCTION:EC
 ECPKPARAMETERS_new                      4155	1_1_0	EXIST::FUNCTION:EC
 ECPARAMETERS_new                        4156	1_1_0	EXIST::FUNCTION:EC
+OCSP_RESPID_set_by_name                 4157	1_1_0a	EXIST::FUNCTION:OCSP
+OCSP_RESPID_set_by_key                  4158	1_1_0a	EXIST::FUNCTION:OCSP
+OCSP_RESPID_match                       4159	1_1_0a	EXIST::FUNCTION:OCSP
+ASN1_ITEM_lookup                        4160	1_1_1	EXIST::FUNCTION:
+ASN1_ITEM_get                           4161	1_1_1	EXIST::FUNCTION:
+BIO_read_ex                             4162	1_1_1	EXIST::FUNCTION:
+BIO_set_callback_ex                     4163	1_1_1	EXIST::FUNCTION:
+BIO_get_callback_ex                     4164	1_1_1	EXIST::FUNCTION:
+BIO_meth_set_read_ex                    4165	1_1_1	EXIST::FUNCTION:
+BIO_meth_get_read_ex                    4166	1_1_1	EXIST::FUNCTION:
+BIO_write_ex                            4167	1_1_1	EXIST::FUNCTION:
+BIO_meth_get_write_ex                   4168	1_1_1	EXIST::FUNCTION:
+BIO_meth_set_write_ex                   4169	1_1_1	EXIST::FUNCTION:
+DSO_pathbyaddr                          4170	1_1_0c	EXIST::FUNCTION:
+DSO_dsobyaddr                           4171	1_1_0c	EXIST::FUNCTION:
+CT_POLICY_EVAL_CTX_get_time             4172	1_1_1	EXIST::FUNCTION:CT
+CT_POLICY_EVAL_CTX_set_time             4173	1_1_1	EXIST::FUNCTION:CT

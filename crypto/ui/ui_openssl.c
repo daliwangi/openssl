@@ -8,6 +8,7 @@
  */
 
 #include <openssl/e_os2.h>
+#include <openssl/err.h>
 
 /*
  * need for #define _POSIX_C_SOURCE arises whenever you pass -ansi to gcc
@@ -219,7 +220,10 @@ static int write_string(UI *ui, UI_STRING *uis)
         fputs(UI_get0_output_string(uis), tty_out);
         fflush(tty_out);
         break;
-    default:
+    case UIT_NONE:
+    case UIT_PROMPT:
+    case UIT_VERIFY:
+    case UIT_BOOLEAN:
         break;
     }
     return 1;
@@ -256,7 +260,9 @@ static int read_string(UI *ui, UI_STRING *uis)
             return 0;
         }
         break;
-    default:
+    case UIT_NONE:
+    case UIT_INFO:
+    case UIT_ERROR:
         break;
     }
     return 1;
@@ -305,23 +311,26 @@ static int read_string_inner(UI *ui, UI_STRING *uis, int echo, int strip_nl)
     if (is_a_tty) {
         DWORD numread;
 #  if defined(CP_UTF8)
-        WCHAR wresult[BUFSIZ];
+        if (GetEnvironmentVariableW(L"OPENSSL_WIN32_UTF8", NULL, 0) != 0) {
+            WCHAR wresult[BUFSIZ];
 
-        if (ReadConsoleW(GetStdHandle(STD_INPUT_HANDLE),
+            if (ReadConsoleW(GetStdHandle(STD_INPUT_HANDLE),
                          wresult, maxsize, &numread, NULL)) {
-            if (numread >= 2 &&
-                wresult[numread-2] == L'\r' && wresult[numread-1] == L'\n') {
-                wresult[numread-2] = L'\n';
-                numread--;
-            }
-            wresult[numread] = '\0';
-            if (WideCharToMultiByte(CP_UTF8, 0, wresult, -1,
-                                    result, sizeof(result), NULL, 0) > 0)
-                p = result;
+                if (numread >= 2 &&
+                    wresult[numread-2] == L'\r' &&
+                    wresult[numread-1] == L'\n') {
+                    wresult[numread-2] = L'\n';
+                    numread--;
+                }
+                wresult[numread] = '\0';
+                if (WideCharToMultiByte(CP_UTF8, 0, wresult, -1,
+                                        result, sizeof(result), NULL, 0) > 0)
+                    p = result;
 
-            OPENSSL_cleanse(wresult, sizeof(wresult));
-        }
-#  else
+                OPENSSL_cleanse(wresult, sizeof(wresult));
+            }
+        } else
+#  endif
         if (ReadConsoleA(GetStdHandle(STD_INPUT_HANDLE),
                          result, maxsize, &numread, NULL)) {
             if (numread >= 2 &&
@@ -332,7 +341,6 @@ static int read_string_inner(UI *ui, UI_STRING *uis, int echo, int strip_nl)
             result[numread] = '\0';
             p = result;
         }
-#  endif
     } else
 # elif defined(OPENSSL_SYS_MSDOS)
     if (!echo) {
@@ -341,7 +349,7 @@ static int read_string_inner(UI *ui, UI_STRING *uis, int echo, int strip_nl)
     } else
 # endif
     p = fgets(result, maxsize, tty_in);
-    if (!p)
+    if (p == NULL)
         goto error;
     if (feof(tty_in))
         goto error;
@@ -421,7 +429,23 @@ static int open_console(UI *ui)
             is_a_tty = 0;
         else
 # endif
-            return 0;
+# ifdef ENODEV
+            /*
+             * MacOS X returns ENODEV (Operation not supported by device),
+             * which seems appropriate.
+             */
+        if (errno == ENODEV)
+            is_a_tty = 0;
+        else
+# endif
+            {
+                char tmp_num[10];
+                BIO_snprintf(tmp_num, sizeof(tmp_num) - 1, "%d", errno);
+                UIerr(UI_F_OPEN_CONSOLE, UI_R_UNKNOWN_TTYGET_ERRNO_VALUE);
+                ERR_add_error_data(2, "errno=", tmp_num);
+
+                return 0;
+            }
     }
 #endif
 #ifdef OPENSSL_SYS_VMS
